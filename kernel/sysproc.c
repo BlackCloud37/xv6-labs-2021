@@ -80,8 +80,52 @@ sys_sleep(void)
 int
 sys_pgaccess(void)
 {
-  // lab pgtbl: your code here.
-  return 0;
+  uint64 start_va;
+  int page_count_to_check;
+  uint64 bitmask;
+
+  if(argaddr(0, &start_va) < 0 || 
+     argint(1, &page_count_to_check) < 0 || 
+     argaddr(2, &bitmask) < 0) {
+    return -1;
+  }
+  if (page_count_to_check > sizeof(uint) * 8) {
+    return -1;
+  }
+  if (start_va >= MAXVA) {
+    return -1;
+  }
+  
+  uint bitmask_buf = {0}; // 8 * sizeof(uint) bits local buffer
+  struct proc* p = myproc();
+  
+  pagetable_t pagetable;
+  for (int i = 0; i < page_count_to_check; i++) {
+    pagetable = p->pagetable;
+    
+    if (start_va >= MAXVA) {
+      panic("pgaccess: va outof range");
+    }
+
+    for (int level = 2; level > 0; level--) {
+      pte_t *pte = &pagetable[PX(level, start_va)];
+      if (*pte & PTE_V) {
+        pagetable = (pagetable_t)PTE2PA(*pte);
+      } else {
+        return -1;
+      }
+    }
+    pte_t *pte = &pagetable[PX(0, start_va)];
+    if (pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0) {
+      return -1;
+    }
+    if (*pte & PTE_A) {
+      bitmask_buf |= 1L << i;
+      *pte = *pte & (~PTE_A);
+    }
+    start_va += PGSIZE;
+  }
+  return copyout(p->pagetable, bitmask, (char *)&bitmask_buf, page_count_to_check / 8 + 1);
 }
 #endif
 
