@@ -48,6 +48,17 @@ kfree(void *pa)
 {
   struct run *r;
 
+  // only free when it's the last ref
+  refcnt_acquire();
+  if (refcnt_get((uint64)pa) > 1) {
+    refcnt_dec((uint64)pa);
+    refcnt_release();
+    return;
+  }
+
+  refcnt_set((uint64)pa, 0);
+  refcnt_release();
+  
   if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
     panic("kfree");
 
@@ -76,7 +87,31 @@ kalloc(void)
     kmem.freelist = r->next;
   release(&kmem.lock);
 
-  if(r)
+  if(r) {
     memset((char*)r, 5, PGSIZE); // fill with junk
+    refcnt_acquire();
+    refcnt_set((uint64)r, 1);
+    refcnt_release();
+  }
+  
   return (void*)r;
+}
+
+void *
+kalloc_no_lock_refcnt(void)
+{
+  struct run *r;
+
+  acquire(&kmem.lock);
+  r = kmem.freelist;
+  if(r)
+    kmem.freelist = r->next;
+  release(&kmem.lock);
+
+  if(r) {
+    memset((char*)r, 5, PGSIZE); // fill with junk
+    refcnt_set((uint64)r, 1);
+  }
+  
+  return (void*)r;  
 }

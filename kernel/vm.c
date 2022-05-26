@@ -5,6 +5,37 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "spinlock.h"
+#include "proc.h"
+
+#define PGIDX(pa) ((pa - KERNBASE) / PGSIZE)
+
+struct {
+  struct spinlock lock;
+  int counts[(PHYSTOP - KERNBASE) / PGSIZE];
+} refcnt;
+
+inline void refcnt_inc(uint64 pa) {
+  refcnt.counts[PGIDX(pa)] += 1;
+}
+
+inline void refcnt_dec(uint64 pa) {
+  refcnt.counts[PGIDX(pa)] -= 1;
+}
+
+inline int refcnt_get(uint64 pa) {
+  return refcnt.counts[PGIDX(pa)];
+}
+inline void refcnt_set(uint64 pa, int n) {
+  refcnt.counts[PGIDX(pa)] = n;
+}
+inline void refcnt_acquire(){
+  acquire(&refcnt.lock);
+}
+
+inline void refcnt_release(){
+  release(&refcnt.lock);
+}
 
 /*
  * the kernel's page table.
@@ -148,8 +179,8 @@ mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
   for(;;){
     if((pte = walk(pagetable, a, 1)) == 0)
       return -1;
-    if(*pte & PTE_V)
-      panic("mappages: remap");
+    // if(*pte & PTE_V)
+    //   panic("mappages: remap");
     *pte = PA2PTE(pa) | perm | PTE_V;
     if(a == last)
       break;
@@ -303,7 +334,6 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
@@ -312,13 +342,16 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
       panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
+    
+    *pte = ((*pte) & (~PTE_W)) | PTE_COW; // clear parent's PTE_W and set PTE_COW
+
+    // clear child's PTE_W and set PTE_COW
+    if(mappages(new, i, PGSIZE, (uint64)pa, (flags & (~PTE_W)) | PTE_COW) != 0){
       goto err;
     }
+    refcnt_acquire();
+    refcnt_inc(pa); // since child ref to same page with parent
+    refcnt_release();
   }
   return 0;
 
@@ -350,9 +383,20 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
+    if (va0 >= MAXVA) 
+      return -1;
     pa0 = walkaddr(pagetable, va0);
+    pte_t *pte = walk(pagetable, va0, 0);
+    if (pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0) 
+      return -1;
     if(pa0 == 0)
       return -1;
+    if ((*pte & PTE_W) == 0) {
+      if (cowcopy(va0) != 0) {
+        return -1;   
+      }
+    }
+    pa0 = PTE2PA(*pte);
     n = PGSIZE - (dstva - va0);
     if(n > len)
       n = len;
@@ -431,4 +475,45 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   } else {
     return -1;
   }
+}
+
+int cowcopy(uint64 va) {
+  if (va >= MAXVA) 
+    return -1;
+  va = PGROUNDDOWN(va);
+  pagetable_t pagetable = myproc()->pagetable;
+  pte_t *pte = walk(pagetable, va, 0);
+  
+  uint64 pa = PTE2PA(*pte);
+  uint flags = PTE_FLAGS(*pte);
+  if ((flags & PTE_COW) == 0) {
+    printf("not cow page\n");
+    return -1;
+  }
+
+  refcnt_acquire();
+  uint cnt = refcnt_get(pa);
+  if (cnt == 0) {
+    panic("cowcopy");
+  }
+  if (cnt == 1) {
+    *pte = ((*pte) & (~PTE_COW)) | PTE_W;
+  } else {
+    char* mem = kalloc_no_lock_refcnt();
+    if (!mem) {
+      goto bad;
+    }
+    memmove(mem, (char*)pa, PGSIZE);
+    if (mappages(pagetable, va, PGSIZE, (uint64)mem, (flags & (~PTE_COW)) | PTE_W) != 0) {
+      kfree(mem);
+      goto bad;
+    }
+    refcnt_dec(pa);
+  }
+
+  refcnt_release();
+  return 0;
+bad:
+  refcnt_release();
+  return -1;
 }
