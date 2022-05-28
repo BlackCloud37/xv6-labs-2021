@@ -1,0 +1,10 @@
+thread1             thread2
+----------------------------------
+...
+e->next = n         
+                    ...
+                    e->next = n
+                    *p = e
+*p = e
+
+value that thread2 wants to insert is miss
