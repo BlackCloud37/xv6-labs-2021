@@ -42,21 +42,22 @@ void put(int key, int value)
 {
   int i = key % NBUCKET;
 
-  pthread_mutex_lock(&bucket_locks[i]); // acquire lock
   // is the key already present?
   struct entry *e = 0;
   for (e = table[i]; e != 0; e = e->next) {
     if (e->key == key)
       break;
   }
+
   if(e){
     // update the existing key.
     e->value = value;
   } else {
+    pthread_mutex_lock(&bucket_locks[i]);
     // the new is new.
     insert(key, value, &table[i], table[i]);
+    pthread_mutex_unlock(&bucket_locks[i]);
   }
-  pthread_mutex_unlock(&bucket_locks[i]); // release lock
 }
 
 static struct entry*
